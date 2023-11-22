@@ -5,8 +5,8 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio_util::codec::{FramedRead, FramedWrite, LengthDelimitedCodec};
 
 mod cli;
-mod connection;
 mod protocol;
+mod quic;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
@@ -20,47 +20,90 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     if let Some(addnode) = args.addnode {
         for node in addnode.iter() {
-            //log::info!("Connecting to node: {:?}", node);
-            let stream = TcpStream::connect(node).await.expect("Error connecting");
-            let (r, w) = stream.into_split();
-            let framed_reader = FramedRead::new(r, LengthDelimitedCodec::new());
-            let framed_writer = FramedWrite::new(w, LengthDelimitedCodec::new());
-            let mut conn = connection::Connection::new(framed_reader, framed_writer);
+            let mut endpoint = quic::Endpoint::client("127.0.0.1:0".parse()?)?;
+            endpoint.set_default_client_config(quic::configure_client());
+
+            // connect to node
+            let connection = endpoint.connect(node.parse()?, "peer")?.await?;
+            let (send, recv) = connection.open_bi().await.unwrap();
+            let mut conn = quic::QuicBiDirectionalStream::new(recv, send);
             if let Ok(addr_iter) = node.to_socket_addrs() {
                 if let Some(addr) = addr_iter.into_iter().next() {
-                    tokio::spawn(async move {
-                        if conn.start_from_connect(&addr).await.is_err() {
-                            log::warn!("Peer {} closed connection", addr)
-                        }
-                    });
+                    if conn.start_from_connect(&addr).await.is_err() {
+                        log::warn!("Peer {} closed connection", addr)
+                    }
                 }
             }
         }
     }
 
-    log::info!("Binding to {}", args.bind);
-    let listener = TcpListener::bind(&args.bind).await?;
-    loop {
-        // Asynchronously wait for an inbound TcpStream.
-        log::info!("Starting accept");
-        match listener.accept().await {
-            Ok((stream, _)) => {
-                let addr = stream.peer_addr()?;
-                log::info!("Accepted connection from {}", addr);
-                let (r, w) = stream.into_split();
-                let framed_reader = FramedRead::new(r, LengthDelimitedCodec::new());
-                let framed_writer = FramedWrite::new(w, LengthDelimitedCodec::new());
-                let mut conn = connection::Connection::new(framed_reader, framed_writer);
+    // if let Some(addnode) = args.addnode {
+    //     for node in addnode.iter() {
+    //         //log::info!("Connecting to node: {:?}", node);
+    //         let stream = TcpStream::connect(node).await.expect("Error connecting");
+    //         let (r, w) = stream.into_split();
+    //         let framed_reader = FramedRead::new(r, LengthDelimitedCodec::new());
+    //         let framed_writer = FramedWrite::new(w, LengthDelimitedCodec::new());
+    //         let mut conn = connection::Connection::new(framed_reader, framed_writer);
+    //         if let Ok(addr_iter) = node.to_socket_addrs() {
+    //             if let Some(addr) = addr_iter.into_iter().next() {
+    //                 tokio::spawn(async move {
+    //                     if conn.start_from_connect(&addr).await.is_err() {
+    //                         log::warn!("Peer {} closed connection", addr)
+    //                     }
+    //                 });
+    //             }
+    //         }
+    //     }
+    // }
 
-                tokio::spawn(async move {
-                    if conn.start_from_accept().await.is_err() {
-                        log::warn!("Peer {} closed connection", addr)
-                    }
-                });
+    log::info!("Binding to {}", args.bind);
+    let (server_config, server_cert) = quic::configure_server()?;
+    let endpoint = quic::Endpoint::server(server_config, args.bind.parse()?)?;
+
+    loop {
+        let incoming_conn = endpoint
+            .accept()
+            .await
+            .ok_or("error accepting incoming connection")?;
+        let connection = incoming_conn.await?;
+        log::info!(
+            "connection accepted: addr={}",
+            connection.remote_address()
+        );
+        let (send, recv) = connection.accept_bi().await.unwrap();
+        let mut conn = quic::QuicBiDirectionalStream::new(recv, send);
+
+        tokio::spawn(async move {
+            if conn.start_from_accept().await.is_err() {
+                log::warn!("Peer {} closed connection", connection.remote_address())
             }
-            Err(e) => log::error!("couldn't get client: {:?}", e),
-        }
+        });
     }
+
+    // let listener = TcpListener::bind(&args.bind).await?;
+    // loop {
+    //     // Asynchronously wait for an inbound TcpStream.
+    //     log::info!("Starting accept");
+    //     match listener.accept().await {
+    //         Ok((stream, _)) => {
+    //             let addr = stream.peer_addr()?;
+    //             log::info!("Accepted connection from {}", addr);
+    //             let (r, w) = stream.into_split();
+    //             let framed_reader = FramedRead::new(r, LengthDelimitedCodec::new());
+    //             let framed_writer = FramedWrite::new(w, LengthDelimitedCodec::new());
+    //             let mut conn = connection::Connection::new(framed_reader, framed_writer);
+    //
+    //             tokio::spawn(async move {
+    //                 if conn.start_from_accept().await.is_err() {
+    //                     log::warn!("Peer {} closed connection", addr)
+    //                 }
+    //             });
+    //         }
+    //         Err(e) => log::error!("couldn't get client: {:?}", e),
+    //     }
+    // }
+    Ok(())
 }
 
 fn setup_logging() {

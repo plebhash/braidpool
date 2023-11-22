@@ -23,10 +23,10 @@ pub enum Message {
 }
 
 impl Message {
-    pub fn as_bytes(&self) -> Option<Bytes> {
+    pub fn as_bytes(&self) -> Option<Vec<u8>> {
         let mut s = flexbuffers::FlexbufferSerializer::new();
         self.serialize(&mut s).unwrap();
-        Some(Bytes::from(s.take_buffer()))
+        Some(s.take_buffer())
     }
 
     pub fn from_bytes(b: &[u8]) -> Result<Self, Box<dyn Error>> {
