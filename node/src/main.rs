@@ -10,6 +10,7 @@ mod cli;
 mod connection;
 mod protocol;
 mod rpc;
+mod sv2;
 mod zmq;
 
 #[tokio::main]
@@ -33,6 +34,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let (block_template_tx, block_template_rx) = mpsc::channel(1);
     tokio::spawn(zmq::zmq_hashblock_listener(zmq_url, rpc, block_template_tx));
     tokio::spawn(block_template::consumer(block_template_rx));
+
+    // SV2
+    tokio::spawn(sv2::jd_server::jd_server());
+    tokio::spawn(sv2::jd_server::pool());
 
     if let Some(addnode) = args.addnode {
         for node in addnode.iter() {
